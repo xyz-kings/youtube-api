@@ -4,9 +4,9 @@ const { YtdlCore } = require("@ybd-project/ytdl-core");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const ytdl = new YtdlCore();
-
 app.disable("x-powered-by");
+
+const ytdl = new YtdlCore();
 
 function send(res, status, data) {
   res.status(status);
@@ -75,48 +75,91 @@ function getVideoId(input) {
 function formatDuration(seconds) {
   const total = Number(seconds);
 
-  if (!Number.isFinite(total)) {
+  if (!Number.isFinite(total) || total <= 0) {
     return "00:00";
   }
 
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = Math.floor(total % 60);
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = Math.floor(total % 60);
 
-  if (h > 0) {
+  if (hours > 0) {
     return [
-      String(h).padStart(2, "0"),
-      String(m).padStart(2, "0"),
-      String(s).padStart(2, "0")
+      String(hours).padStart(2, "0"),
+      String(minutes).padStart(2, "0"),
+      String(secs).padStart(2, "0")
     ].join(":");
   }
 
   return [
-    String(m).padStart(2, "0"),
-    String(s).padStart(2, "0")
+    String(minutes).padStart(2, "0"),
+    String(secs).padStart(2, "0")
   ].join(":");
 }
 
 function formatSize(bytes) {
-  const size = Number(bytes);
+  const value = Number(bytes);
 
-  if (!Number.isFinite(size) || size <= 0) {
+  if (!Number.isFinite(value) || value <= 0) {
     return null;
   }
 
   const units = ["B", "KB", "MB", "GB"];
-  let value = size;
+
+  let size = value;
   let index = 0;
 
-  while (value >= 1024 && index < units.length - 1) {
-    value /= 1024;
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024;
     index++;
   }
 
-  return `${value.toFixed(index === 0 ? 0 : 2)} ${units[index]}`;
+  if (index === 0) {
+    return `${Math.round(size)} B`;
+  }
+
+  return `${size.toFixed(2)} ${units[index]}`;
 }
 
-function getQuality(format) {
+function getMime(format) {
+  if (format.mimeType) {
+    return String(format.mimeType).split(";")[0];
+  }
+
+  return "";
+}
+
+function getFormat(format) {
+  if (format.container) {
+    return String(format.container).toLowerCase();
+  }
+
+  const mime = getMime(format);
+
+  if (mime.includes("mp4")) {
+    return "mp4";
+  }
+
+  if (mime.includes("webm")) {
+    return "webm";
+  }
+
+  if (mime.includes("m4a")) {
+    return "m4a";
+  }
+
+  return "unknown";
+}
+
+function getVideoQuality(format) {
+  if (
+    format.quality &&
+    typeof format.quality === "object" &&
+    format.quality.label
+  ) {
+    return format.quality.label;
+  }
+
   if (format.qualityLabel) {
     return format.qualityLabel;
   }
@@ -128,65 +171,99 @@ function getQuality(format) {
   return "unknown";
 }
 
-function getBitrate(format) {
-  const bitrate =
-    Number(format.audioBitrate) ||
-    Math.round(Number(format.bitrate || 0) / 1000);
-
-  if (!bitrate) {
-    return "audio";
+function getAudioQuality(format) {
+  if (format.audioBitrate) {
+    return `${Math.round(Number(format.audioBitrate))}kbps`;
   }
 
-  return `${bitrate}kbps`;
+  if (format.bitrate) {
+    return `${Math.round(Number(format.bitrate) / 1000)}kbps`;
+  }
+
+  return "audio";
+}
+
+function getHeight(format) {
+  if (format.height) {
+    return Number(format.height) || 0;
+  }
+
+  if (
+    format.quality &&
+    typeof format.quality === "object" &&
+    format.quality.label
+  ) {
+    const match = String(format.quality.label).match(/(\d+)p/);
+
+    if (match) {
+      return Number(match[1]);
+    }
+  }
+
+  return 0;
 }
 
 function buildMedias(formats) {
+  if (!Array.isArray(formats)) {
+    return [];
+  }
+
   const medias = [];
 
-  const videoFormats = formats
+  const usable = formats.filter((format) => {
+    return (
+      format &&
+      typeof format === "object" &&
+      format.url &&
+      !format.isHLS &&
+      !format.isDashMPD
+    );
+  });
+
+  const videoFormats = usable
     .filter((format) => {
-      return (
-        format.hasVideo &&
-        format.container === "mp4" &&
-        format.url
-      );
+      return format.hasVideo === true;
     })
     .sort((a, b) => {
-      return Number(b.height || 0) - Number(a.height || 0);
+      return getHeight(b) - getHeight(a);
     });
 
-  const audioFormats = formats
+  const audioFormats = usable
     .filter((format) => {
       return (
-        format.hasAudio &&
-        !format.hasVideo &&
-        format.url
+        format.hasAudio === true &&
+        format.hasVideo !== true
       );
     })
     .sort((a, b) => {
-      return Number(b.audioBitrate || b.bitrate || 0) -
+      const bitrateA =
         Number(a.audioBitrate || a.bitrate || 0);
+
+      const bitrateB =
+        Number(b.audioBitrate || b.bitrate || 0);
+
+      return bitrateB - bitrateA;
     });
 
   const usedVideo = new Set();
 
   for (const format of videoFormats) {
-    const quality = getQuality(format);
+    const quality = getVideoQuality(format);
 
-    if (
-      !quality ||
-      quality === "unknown" ||
-      usedVideo.has(quality)
-    ) {
+    if (quality === "unknown") {
+      continue;
+    }
+
+    if (usedVideo.has(quality)) {
       continue;
     }
 
     usedVideo.add(quality);
 
     medias.push({
-      mediaType: "video",
+      mediaType: format.hasAudio ? "video+audio" : "video",
       quality,
-      format: format.container || "mp4",
+      format: getFormat(format),
       size: formatSize(format.contentLength),
       url: format.url
     });
@@ -195,7 +272,7 @@ function buildMedias(formats) {
   const usedAudio = new Set();
 
   for (const format of audioFormats) {
-    const quality = getBitrate(format);
+    const quality = getAudioQuality(format);
 
     if (usedAudio.has(quality)) {
       continue;
@@ -206,20 +283,70 @@ function buildMedias(formats) {
     medias.push({
       mediaType: "audio",
       quality,
-      format:
-        format.container ||
-        (
-          format.mimeType &&
-          format.mimeType.includes("webm")
-            ? "webm"
-            : "m4a"
-        ),
+      format: getFormat(format),
       size: formatSize(format.contentLength),
       url: format.url
     });
   }
 
   return medias;
+}
+
+function getTitle(info) {
+  if (info?.videoDetails?.title) {
+    return info.videoDetails.title;
+  }
+
+  if (info?.title) {
+    return info.title;
+  }
+
+  if (info?.basic_info?.title) {
+    return info.basic_info.title;
+  }
+
+  return "Unknown Title";
+}
+
+function getDuration(info) {
+  if (info?.videoDetails?.lengthSeconds) {
+    return formatDuration(
+      info.videoDetails.lengthSeconds
+    );
+  }
+
+  if (info?.lengthSeconds) {
+    return formatDuration(info.lengthSeconds);
+  }
+
+  if (info?.basic_info?.duration) {
+    return formatDuration(info.basic_info.duration);
+  }
+
+  return "00:00";
+}
+
+function getThumbnail(info, videoId) {
+  const thumbnails =
+    info?.videoDetails?.thumbnails ||
+    info?.thumbnails ||
+    info?.basic_info?.thumbnail ||
+    [];
+
+  if (Array.isArray(thumbnails) && thumbnails.length) {
+    const thumbnail =
+      thumbnails[thumbnails.length - 1];
+
+    if (typeof thumbnail === "string") {
+      return thumbnail;
+    }
+
+    if (thumbnail?.url) {
+      return thumbnail.url;
+    }
+  }
+
+  return `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`;
 }
 
 app.get("/", (req, res) => {
@@ -231,56 +358,60 @@ app.get("/", (req, res) => {
     req.headers["x-forwarded-proto"] ||
     "https";
 
-  const base =
-    `${protocol}://${host}`;
+  const base = `${protocol}://${host}`;
 
-  const youtubeUrl =
+  const example =
     "https://www.youtube.com/watch?v=fKcF32dmcDk";
 
   return send(res, 200, {
     success: true,
     provider: "xyzkings",
     name: "XYZ YouTube API",
-    version: "2.0.0",
+    version: "2.1.0",
     status: "online",
-    endpoint: "/xyzdl",
-    method: "GET",
-    parameter: {
-      url: "YouTube URL atau YouTube Video ID"
+    apiKey: false,
+
+    endpoint: {
+      path: "/xyzdl",
+      method: "GET",
+      parameter: "url"
     },
+
     usage: {
-      url:
-        `${base}/xyzdl?url=${encodeURIComponent(youtubeUrl)}`,
+      example:
+        `${base}/xyzdl?url=${encodeURIComponent(example)}`,
 
       curl:
-        `curl "${base}/xyzdl?url=${youtubeUrl}"`,
+        `curl "${base}/xyzdl?url=${example}"`,
 
       nodejs:
-        `const response = await fetch("${base}/xyzdl?url=${youtubeUrl}");\nconst data = await response.json();\nconsole.log(data);`
+        `const r = await fetch("${base}/xyzdl?url=${example}");\nconst data = await r.json();\nconsole.log(data);`
     },
-    output: {
-      title: "Video title",
+
+    response: {
+      title: "YouTube video title",
       imageUrl: "YouTube thumbnail",
-      duration: "HH:MM:SS atau MM:SS",
+      duration: "MM:SS or HH:MM:SS",
       medias: [
         {
           mediaType: "video",
           quality: "720p",
           format: "mp4",
-          size: "28.60 MB",
-          url: "Temporary Google video stream URL"
+          size: "19.43 MB",
+          url: "https://*.googlevideo.com/videoplayback?... "
         },
         {
           mediaType: "audio",
           quality: "128kbps",
           format: "m4a",
-          size: "4.20 MB",
-          url: "Temporary Google video stream URL"
+          size: "4.21 MB",
+          url: "https://*.googlevideo.com/videoplayback?... "
         }
       ]
     },
+
     note:
-      "Media URLs are temporary YouTube stream URLs and may expire."
+      "Media URLs are temporary YouTube stream URLs."
   });
 });
 
@@ -314,31 +445,36 @@ app.get("/xyzdl", async (req, res) => {
       });
     }
 
-    const url =
+    const youtubeUrl =
       `https://www.youtube.com/watch?v=${videoId}`;
 
-    const info = await ytdl.getFullInfo(url);
+    console.log(
+      `[XYZDL] Resolving ${videoId}`
+    );
 
-    const details = info.videoDetails || {};
+    const info =
+      await ytdl.getFullInfo(youtubeUrl);
 
-    const title =
-      details.title ||
-      "Unknown Title";
+    const formats =
+      Array.isArray(info.formats)
+        ? info.formats
+        : [];
 
-    const duration =
-      formatDuration(details.lengthSeconds);
-
-    const thumbnails =
-      details.thumbnails ||
-      [];
-
-    const imageUrl =
-      thumbnails.length
-        ? thumbnails[thumbnails.length - 1].url
-        : `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`;
+    console.log(
+      `[XYZDL] Formats found: ${formats.length}`
+    );
 
     const medias =
-      buildMedias(info.formats || []);
+      buildMedias(formats);
+
+    const title =
+      getTitle(info);
+
+    const imageUrl =
+      getThumbnail(info, videoId);
+
+    const duration =
+      getDuration(info);
 
     return send(res, 200, {
       success: true,
@@ -356,35 +492,43 @@ app.get("/xyzdl", async (req, res) => {
     });
   } catch (error) {
     console.error(
-      "[XYZ-YOUTUBE]",
-      error?.stack || error?.message || error
+      "[XYZDL ERROR]",
+      error?.stack ||
+      error?.message ||
+      error
     );
 
-    let code = "5000";
-    let message = "Failed to retrieve YouTube information";
+    const message =
+      String(
+        error?.message ||
+        error ||
+        ""
+      );
 
-    const errorText =
-      String(error?.message || error || "");
+    let code = "5000";
+    let msg =
+      "Failed to retrieve YouTube information";
 
     if (
-      errorText.includes("Video unavailable") ||
-      errorText.includes("Video not found")
+      /unavailable|not found/i.test(message)
     ) {
       code = "4004";
-      message = "Video not found or unavailable";
-    } else if (
-      errorText.includes("Sign in") ||
-      errorText.includes("bot")
+      msg = "Video not found or unavailable";
+    }
+
+    if (
+      /429|too many requests|rate limit/i.test(message)
     ) {
       code = "4290";
-      message =
-        "YouTube requires additional verification";
-    } else if (
-      errorText.includes("403")
+      msg = "YouTube rate limit reached";
+    }
+
+    if (
+      /sign in|bot|verification/i.test(message)
     ) {
-      code = "4030";
-      message =
-        "YouTube denied access to the requested stream";
+      code = "4291";
+      msg =
+        "YouTube requires additional verification";
     }
 
     return send(res, 500, {
@@ -392,7 +536,7 @@ app.get("/xyzdl", async (req, res) => {
       provider: "xyzkings",
       data: {
         code,
-        msg: message,
+        msg,
         data: null
       }
     });
