@@ -7,6 +7,7 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "@ybd-project/ytdl-core": "6.0.8",
   }
 }
