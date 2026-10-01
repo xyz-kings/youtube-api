@@ -1,0 +1,12 @@
+{
+  "name": "xyz-youtube-api",
+  "version": "1.0.0",
+  "description": "YouTube downloader API proxy",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}
