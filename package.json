@@ -8,6 +8,6 @@
   },
   "dependencies": {
     "express": "^5.1.0",
-    "@ybd-project/ytdl-core": "6.0.8",
+    "@ybd-project/ytdl-core": "6.0.8"
   }
 }
