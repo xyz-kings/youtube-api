@@ -25,6 +25,21 @@ const httpFetch = async (url, init = {}) => {
   return fetch(url, { ...init, dispatcher: proxyDispatcher })
 }
 
+// Terima cookie dalam bentuk header ("a=b; c=d") ATAU isi file cookies.txt (format Netscape)
+const buildCookieHeader = (raw) => {
+  if (!raw) return undefined
+  const s = String(raw).trim()
+  if (!s.includes('\t')) return s
+  const parts = []
+  for (const line of s.split(/\r?\n/)) {
+    if (!line || line.startsWith('#')) continue
+    const f = line.split('\t')
+    if (f.length >= 7) parts.push(`${f[5]}=${f[6]}`)
+  }
+  return parts.length ? parts.join('; ') : undefined
+}
+const COOKIE = buildCookieHeader(process.env.YT_COOKIE)
+
 let shimReady = false
 const setupShim = async () => {
   if (shimReady) return
@@ -81,7 +96,7 @@ const ensurePot = async () => {
     userAgent: USER_AGENT
   })
   const pageHeaders = { 'user-agent': USER_AGENT, 'accept-language': 'en-US,en;q=0.7' }
-  if (process.env.YT_COOKIE) pageHeaders.cookie = process.env.YT_COOKIE
+  if (COOKIE) pageHeaders.cookie = COOKIE
   const pageHtml = await (await httpFetch('https://www.youtube.com', { headers: pageHeaders })).text()
   const cfg = JSON.parse(pageHtml.match(/ytcfg\.set\(({.+?})\);/s)[1])
   const visitorData = cfg.VISITOR_DATA || cfg.INNERTUBE_CONTEXT?.client?.visitorData
@@ -132,7 +147,7 @@ const buildClient = async (clientType, visitorData, poToken) => {
   await setupShim()
   const { Innertube } = await import('youtubei.js')
   const options = { client_type: clientType, retrieve_player: true, location: 'US', lang: 'en', fetch: httpFetch }
-  if (process.env.YT_COOKIE) options.cookie = process.env.YT_COOKIE
+  if (COOKIE) options.cookie = COOKIE
   if (visitorData) options.visitor_data = visitorData
   else if (process.env.YT_VISITOR_DATA) options.visitor_data = process.env.YT_VISITOR_DATA
   if (poToken) options.po_token = poToken
@@ -275,7 +290,8 @@ app.get('/', (req, res) => {
     message: 'API aktif. Cara pakai: /ytdl?url=<link_youtube>',
     name: API_NAME,
     author: AUTHOR,
-    clients: ['VISIONOS+POT', ...FALLBACK_CLIENTS]
+    clients: ['VISIONOS+POT', ...FALLBACK_CLIENTS],
+    auth: { cookie: !!COOKIE, proxy: !!process.env.YT_PROXY }
   })
 })
 
