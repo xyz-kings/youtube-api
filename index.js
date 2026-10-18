@@ -1,5 +1,9 @@
 const express = require('express')
 const vm = require('vm')
+const fs = require('fs')
+const path = require('path')
+try { fs.copyFileSync(path.join(__dirname,'fix_sniffer.js'), path.join(__dirname,'node_modules','html-encoding-sniffer','lib','html-encoding-sniffer.js')); } catch(e){}
+
 
 const app = express()
 const PORT = process.env.PORT || 4320
