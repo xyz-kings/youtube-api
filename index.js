@@ -16,13 +16,15 @@ const WEB_REQUEST_KEY = 'O43z0dpjhgX20SCx4KAo'
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 
 let proxyDispatcher = null
+let proxyFetch = null
 const httpFetch = async (url, init = {}) => {
   if (!process.env.YT_PROXY) return fetch(url, init)
   if (!proxyDispatcher) {
-    const { ProxyAgent } = await import('undici')
+    const { ProxyAgent, fetch: undiciFetch } = await import('undici')
     proxyDispatcher = new ProxyAgent(process.env.YT_PROXY)
+    proxyFetch = undiciFetch
   }
-  return fetch(url, { ...init, dispatcher: proxyDispatcher })
+  return proxyFetch(url, { ...init, dispatcher: proxyDispatcher })
 }
 
 // Terima cookie dalam bentuk header ("a=b; c=d") ATAU isi file cookies.txt (format Netscape)
