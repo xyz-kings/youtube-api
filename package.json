@@ -1,13 +1,16 @@
 {
-  "name": "xyz-youtube-api",
+  "name": "ytdl-api",
   "version": "1.0.0",
-  "description": "YouTube downloader API proxy",
+  "description": "Simple YouTube downloader API",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "express": "^5.1.0",
-    "@ybd-project/ytdl-core": "6.0.8"
+    "express": "^4.21.2",
+    "youtubei.js": "^18.2.0"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
