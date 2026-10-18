@@ -15,6 +15,16 @@ const FALLBACK_CLIENTS = (process.env.YT_CLIENTS || 'VISIONOS,ANDROID,IOS,TVHTML
 const WEB_REQUEST_KEY = 'O43z0dpjhgX20SCx4KAo'
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 
+let proxyDispatcher = null
+const httpFetch = async (url, init = {}) => {
+  if (!process.env.YT_PROXY) return fetch(url, init)
+  if (!proxyDispatcher) {
+    const { ProxyAgent } = await import('undici')
+    proxyDispatcher = new ProxyAgent(process.env.YT_PROXY)
+  }
+  return fetch(url, { ...init, dispatcher: proxyDispatcher })
+}
+
 let shimReady = false
 const setupShim = async () => {
   if (shimReady) return
@@ -70,9 +80,9 @@ const ensurePot = async () => {
     referrer: 'https://www.youtube.com/',
     userAgent: USER_AGENT
   })
-  const pageHtml = await (
-    await fetch('https://www.youtube.com', { headers: { 'user-agent': USER_AGENT, 'accept-language': 'en-US,en;q=0.7' } })
-  ).text()
+  const pageHeaders = { 'user-agent': USER_AGENT, 'accept-language': 'en-US,en;q=0.7' }
+  if (process.env.YT_COOKIE) pageHeaders.cookie = process.env.YT_COOKIE
+  const pageHtml = await (await httpFetch('https://www.youtube.com', { headers: pageHeaders })).text()
   const cfg = JSON.parse(pageHtml.match(/ytcfg\.set\(({.+?})\);/s)[1])
   const visitorData = cfg.VISITOR_DATA || cfg.INNERTUBE_CONTEXT?.client?.visitorData
   if (!visitorData) throw new Error('visitorData tidak ditemukan')
@@ -89,7 +99,7 @@ const ensurePot = async () => {
 
   const att = parseLooseJSON(pageHtml.match(/window\.ytAtN\(\s*({[\s\S]*?})\s*\)/)[1]).R
   const interpreterUrl = att.bgChallenge.interpreterUrl.privateDoNotAccessOrElseTrustedResourceUrlWrappedValue
-  new Function(await (await fetch(`https:${interpreterUrl}`)).text())()
+  new Function(await (await httpFetch(`https:${interpreterUrl}`)).text())()
 
   const botGuard = await BotGuardClient.create({
     program: att.bgChallenge.program,
@@ -99,7 +109,7 @@ const ensurePot = async () => {
   const signalOutput = []
   const botguardResponse = await botGuard.snapshot({ webPoSignalOutput: signalOutput })
   const it = await (
-    await fetch(buildURL('GenerateIT', true), {
+    await httpFetch(buildURL('GenerateIT', true), {
       method: 'POST',
       headers: getHeaders(),
       body: JSON.stringify([WEB_REQUEST_KEY, botguardResponse])
@@ -121,7 +131,7 @@ const clientCache = new Map()
 const buildClient = async (clientType, visitorData, poToken) => {
   await setupShim()
   const { Innertube } = await import('youtubei.js')
-  const options = { client_type: clientType, retrieve_player: true, location: 'US', lang: 'en' }
+  const options = { client_type: clientType, retrieve_player: true, location: 'US', lang: 'en', fetch: httpFetch }
   if (process.env.YT_COOKIE) options.cookie = process.env.YT_COOKIE
   if (visitorData) options.visitor_data = visitorData
   else if (process.env.YT_VISITOR_DATA) options.visitor_data = process.env.YT_VISITOR_DATA
