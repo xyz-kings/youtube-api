@@ -271,29 +271,36 @@ app.get('/', (req, res) => {
 
 app.get('/potdebug', async (req, res) => {
   const id = getVideoId(req.query.url || 'UjyCqQjW6ks') || 'UjyCqQjW6ks'
-  const out = { id, steps: [] }
+  const list = String(req.query.client || 'VISIONOS,WEB,ANDROID,IOS,TVHTML5').split(',').map((s) => s.trim()).filter(Boolean)
+  const out = { id, node: process.version, steps: [] }
+  let pot
   try {
     const t0 = Date.now()
-    const pot = await ensurePot()
+    pot = await ensurePot()
     out.steps.push({ step: 'pot', ok: true, ms: Date.now() - t0, visitor: pot.visitorData.slice(0, 24) })
     const poToken = await pot.minter.mintAsWebsafeString(id)
     out.steps.push({ step: 'mint', ok: true, len: poToken.length })
-    const yt = await getClient('VISIONOS', pot.visitorData)
-    const info = await yt.getBasicInfo(id, { po_token: poToken })
-    const sd = info.streaming_data
-    let ok = 0
-    for (const f of [...(sd?.formats || []), ...(sd?.adaptive_formats || [])]) {
-      if (await resolveUrl(f, yt)) ok++
+    for (const clientType of list) {
+      try {
+        const yt = await getClient(clientType, pot.visitorData)
+        const info = await yt.getBasicInfo(id, { po_token: poToken })
+        const sd = info.streaming_data
+        let ok = 0
+        for (const f of [...(sd?.formats || []), ...(sd?.adaptive_formats || [])]) {
+          if (await resolveUrl(f, yt)) ok++
+        }
+        out.steps.push({
+          client: clientType,
+          playability: info.playability_status?.status,
+          title: info.basic_info?.title || null,
+          formats: (sd?.formats || []).length,
+          adaptive: (sd?.adaptive_formats || []).length,
+          urls: ok
+        })
+      } catch (err) {
+        out.steps.push({ client: clientType, error: String(err.message || err).slice(0, 160) })
+      }
     }
-    out.steps.push({
-      step: 'visionos+pot',
-      playability: info.playability_status?.status,
-      title: info.basic_info?.title || null,
-      formats: (sd?.formats || []).length,
-      adaptive: (sd?.adaptive_formats || []).length,
-      urls: ok,
-      totalMs: Date.now() - t0
-    })
   } catch (err) {
     out.steps.push({ step: 'error', message: String(err.message || err).slice(0, 200) })
   }
