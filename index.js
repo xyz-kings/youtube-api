@@ -6,10 +6,13 @@ const PORT = process.env.PORT || 4320
 const AUTHOR = process.env.AUTHOR || 'your-name'
 const API_NAME = 'YouTube Downloader API'
 
-const DEFAULT_CLIENTS = (process.env.YT_CLIENTS || 'VISIONOS,IOS,ANDROID,TVHTML5,TVHTML5_SIMPLY_EMBEDDED_PLAYER,WEB_EMBEDDED_PLAYER')
+const FALLBACK_CLIENTS = (process.env.YT_CLIENTS || 'VISIONOS,ANDROID,IOS,TVHTML5,WEB')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean)
+
+const WEB_REQUEST_KEY = 'O43z0dpjhgX20SCx4KAo'
+const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 
 let shimReady = false
 const setupShim = async () => {
@@ -23,26 +26,124 @@ const setupShim = async () => {
   shimReady = true
 }
 
-const clientCache = new Map()
-const getClient = (clientType) => {
-  if (!clientCache.has(clientType)) {
-    const promise = (async () => {
-      await setupShim()
-      const { Innertube } = await import('youtubei.js')
-      const options = { client_type: clientType, retrieve_player: true, location: 'US', lang: 'en' }
-      if (process.env.YT_COOKIE) options.cookie = process.env.YT_COOKIE
-      if (process.env.YT_PO_TOKEN) options.po_token = process.env.YT_PO_TOKEN
-      if (process.env.YT_VISITOR_DATA) options.visitor_data = process.env.YT_VISITOR_DATA
-      return Innertube.create(options)
-    })().catch((err) => {
-      clientCache.delete(clientType)
-      throw err
-    })
-    clientCache.set(clientType, promise)
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+const toDuration = (sec) => {
+  const s = Number(sec) || 0
+  return [Math.floor(s / 3600), Math.floor((s % 3600) / 60), s % 60]
+    .map((n) => String(n).padStart(2, '0'))
+    .join(':')
+}
+const getVideoId = (input) => {
+  if (!input) return null
+  if (/^[\w-]{11}$/.test(input)) return input
+  try {
+    const u = new URL(input)
+    if (u.hostname.endsWith('youtube.com')) {
+      const v = u.searchParams.get('v')
+      if (v) return v
+      const parts = u.pathname.split('/').filter(Boolean)
+      if (['embed', 'shorts', 'live', 'v'].includes(parts[0]) && parts[1]) return parts[1]
+      return null
+    }
+    if (u.hostname === 'youtu.be') return u.pathname.split('/').filter(Boolean)[0] || null
+  } catch {
+    return null
   }
-  return clientCache.get(clientType)
+  return null
 }
 
+// ------------------------------------------------------------------
+// PO Token (BotGuard) provider
+// ------------------------------------------------------------------
+let potCache = null
+const ensurePot = async () => {
+  if (potCache && Date.now() - potCache.createdAt < 6 * 60 * 60 * 1000) return potCache
+
+  const { BotGuardClient } = await import('bgutils-js/botguard')
+  const { buildURL, parseLooseJSON, getHeaders } = await import('bgutils-js/utils')
+  const { WebPoMinter } = await import('bgutils-js/webpo')
+  const { JSDOM } = await import('jsdom')
+
+  const dom = new JSDOM('<!DOCTYPE html><html lang="en"><head></head><body></body></html>', {
+    url: 'https://www.youtube.com',
+    referrer: 'https://www.youtube.com/',
+    userAgent: USER_AGENT
+  })
+  const pageHtml = await (
+    await fetch('https://www.youtube.com', { headers: { 'user-agent': USER_AGENT, 'accept-language': 'en-US,en;q=0.7' } })
+  ).text()
+  const cfg = JSON.parse(pageHtml.match(/ytcfg\.set\(({.+?})\);/s)[1])
+  const visitorData = cfg.VISITOR_DATA || cfg.INNERTUBE_CONTEXT?.client?.visitorData
+  if (!visitorData) throw new Error('visitorData tidak ditemukan')
+
+  dom.window.yt = { config_: cfg }
+  Object.assign(globalThis, {
+    yt: dom.window.yt,
+    window: dom.window,
+    document: dom.window.document,
+    location: dom.window.location,
+    origin: dom.window.origin
+  })
+  if (!('navigator' in globalThis)) Object.defineProperty(globalThis, 'navigator', { value: dom.window.navigator })
+
+  const att = parseLooseJSON(pageHtml.match(/window\.ytAtN\(\s*({[\s\S]*?})\s*\)/)[1]).R
+  const interpreterUrl = att.bgChallenge.interpreterUrl.privateDoNotAccessOrElseTrustedResourceUrlWrappedValue
+  new Function(await (await fetch(`https:${interpreterUrl}`)).text())()
+
+  const botGuard = await BotGuardClient.create({
+    program: att.bgChallenge.program,
+    globalName: att.bgChallenge.globalName,
+    globalObject: globalThis
+  })
+  const signalOutput = []
+  const botguardResponse = await botGuard.snapshot({ webPoSignalOutput: signalOutput })
+  const it = await (
+    await fetch(buildURL('GenerateIT', true), {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify([WEB_REQUEST_KEY, botguardResponse])
+    })
+  ).json()
+  if (!Array.isArray(it) || !it[0]) throw new Error('GenerateIT gagal')
+  const minter = await WebPoMinter.create(
+    { integrityToken: it[0], estimatedTtlSecs: it[1], mintRefreshThreshold: it[2], websafeFallbackToken: it[3] },
+    signalOutput
+  )
+  potCache = { visitorData, minter, createdAt: Date.now() }
+  return potCache
+}
+
+// ------------------------------------------------------------------
+// Innertube clients
+// ------------------------------------------------------------------
+const clientCache = new Map()
+const buildClient = async (clientType, visitorData, poToken) => {
+  await setupShim()
+  const { Innertube } = await import('youtubei.js')
+  const options = { client_type: clientType, retrieve_player: true, location: 'US', lang: 'en' }
+  if (process.env.YT_COOKIE) options.cookie = process.env.YT_COOKIE
+  if (visitorData) options.visitor_data = visitorData
+  else if (process.env.YT_VISITOR_DATA) options.visitor_data = process.env.YT_VISITOR_DATA
+  if (poToken) options.po_token = poToken
+  else if (process.env.YT_PO_TOKEN) options.po_token = process.env.YT_PO_TOKEN
+  return Innertube.create(options)
+}
+
+const getClient = (clientType, visitorData) => {
+  const key = visitorData ? `${clientType}:${visitorData.slice(-12)}` : clientType
+  if (!clientCache.has(key)) {
+    const promise = buildClient(clientType, visitorData).catch((err) => {
+      clientCache.delete(key)
+      throw err
+    })
+    clientCache.set(key, promise)
+  }
+  return clientCache.get(key)
+}
+
+// ------------------------------------------------------------------
+// Format extraction
+// ------------------------------------------------------------------
 const resolveUrl = async (format, yt) => {
   if (typeof format.url === 'string' && format.url.startsWith('http')) return format.url
   try {
@@ -51,33 +152,6 @@ const resolveUrl = async (format, yt) => {
   } catch {
     return null
   }
-}
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-
-const toDuration = (sec) => {
-  const s = Number(sec) || 0
-  return [Math.floor(s / 3600), Math.floor((s % 3600) / 60), s % 60]
-    .map((n) => String(n).padStart(2, '0'))
-    .join(':')
-}
-
-const getVideoId = (input) => {
-  if (!input) return null
-  if (/^[A-Za-z0-9_-]{11}$/.test(input)) return input
-  try {
-    const u = new URL(input)
-    if (u.hostname === 'youtube.com' || u.hostname.endsWith('.youtube.com')) {
-      const v = u.searchParams.get('v')
-      if (v) return v
-      const parts = u.pathname.split('/').filter(Boolean)
-      if (['shorts', 'embed', 'live', 'v'].includes(parts[0]) && parts[1]) return parts[1]
-    }
-    if (u.hostname === 'youtu.be') return u.pathname.slice(1).split('/')[0]
-  } catch {
-    return null
-  }
-  return null
 }
 
 const gatherFormats = async (yt, info) => {
@@ -125,17 +199,6 @@ const gatherFormats = async (yt, info) => {
   return { mp4: dedupe(mp4), mp3: dedupe(mp3) }
 }
 
-const processClient = async (clientType, id) => {
-  const yt = await getClient(clientType)
-  let info
-  for (let attempt = 0; attempt < 2; attempt++) {
-    info = await yt.getBasicInfo(id)
-    if (info.streaming_data) break
-    await sleep(400)
-  }
-  return { yt, info }
-}
-
 const buildResponse = async (id, yt, info) => {
   const details = info.basic_info || {}
   const { mp4, mp3 } = await gatherFormats(yt, info)
@@ -168,7 +231,32 @@ const buildResponse = async (id, yt, info) => {
   }
 }
 
-const getVideoIdOr400 = (input) => getVideoId(input)
+// ------------------------------------------------------------------
+// Core: try POT + VISIONOS, then fallbacks
+// ------------------------------------------------------------------
+const withPot = async (id) => {
+  const pot = await ensurePot()
+  const poToken = await pot.minter.mintAsWebsafeString(id)
+  const yt = await getClient('VISIONOS', pot.visitorData)
+  let info
+  for (let i = 0; i < 2; i++) {
+    info = await yt.getBasicInfo(id, { po_token: poToken })
+    if (info.streaming_data?.adaptive_formats?.length) break
+    await sleep(400)
+  }
+  return { yt, info, poToken }
+}
+
+const processFallback = async (clientType, id) => {
+  const yt = await getClient(clientType)
+  let info
+  for (let attempt = 0; attempt < 2; attempt++) {
+    info = await yt.getBasicInfo(id)
+    if (info.streaming_data) break
+    await sleep(400)
+  }
+  return { yt, info }
+}
 
 app.get('/', (req, res) => {
   res.json({
@@ -176,8 +264,39 @@ app.get('/', (req, res) => {
     message: 'API aktif. Cara pakai: /ytdl?url=<link_youtube>',
     name: API_NAME,
     author: AUTHOR,
-    clients: DEFAULT_CLIENTS
+    clients: ['VISIONOS+POT', ...FALLBACK_CLIENTS]
   })
+})
+
+app.get('/potdebug', async (req, res) => {
+  const id = getVideoId(req.query.url || 'UjyCqQjW6ks') || 'UjyCqQjW6ks'
+  const out = { id, steps: [] }
+  try {
+    const t0 = Date.now()
+    const pot = await ensurePot()
+    out.steps.push({ step: 'pot', ok: true, ms: Date.now() - t0, visitor: pot.visitorData.slice(0, 24) })
+    const poToken = await pot.minter.mintAsWebsafeString(id)
+    out.steps.push({ step: 'mint', ok: true, len: poToken.length })
+    const yt = await getClient('VISIONOS', pot.visitorData)
+    const info = await yt.getBasicInfo(id, { po_token: poToken })
+    const sd = info.streaming_data
+    let ok = 0
+    for (const f of [...(sd?.formats || []), ...(sd?.adaptive_formats || [])]) {
+      if (await resolveUrl(f, yt)) ok++
+    }
+    out.steps.push({
+      step: 'visionos+pot',
+      playability: info.playability_status?.status,
+      title: info.basic_info?.title || null,
+      formats: (sd?.formats || []).length,
+      adaptive: (sd?.adaptive_formats || []).length,
+      urls: ok,
+      totalMs: Date.now() - t0
+    })
+  } catch (err) {
+    out.steps.push({ step: 'error', message: String(err.message || err).slice(0, 200) })
+  }
+  res.json(out)
 })
 
 app.get('/ytdl', async (req, res) => {
@@ -185,30 +304,28 @@ app.get('/ytdl', async (req, res) => {
   if (!input) {
     return res.status(400).json({ status: false, author: AUTHOR, message: 'Parameter url tidak ditemukan. Contoh: /ytdl?url=https://youtu.be/xxxxx' })
   }
-  const id = getVideoIdOr400(input)
+  const id = getVideoId(input)
   if (!id) {
     return res.status(400).json({ status: false, author: AUTHOR, message: 'URL YouTube tidak valid.' })
   }
 
   const clientsWanted = req.query.client
     ? String(req.query.client).split(',').map((s) => s.trim()).filter(Boolean)
-    : DEFAULT_CLIENTS
+    : FALLBACK_CLIENTS
 
   if (req.query.debug) {
     const diagnostics = []
     for (const clientType of clientsWanted) {
       const entry = { client: clientType }
       try {
-        const { yt, info } = await processClient(clientType, id)
+        const { yt, info } = await processFallback(clientType, id)
         const sd = info.streaming_data
         entry.playability = info.playability_status?.status || null
         entry.title = info.basic_info?.title || null
         entry.formats = (sd?.formats || []).length
         entry.adaptive = (sd?.adaptive_formats || []).length
         let ok = 0
-        for (const f of [...(sd?.formats || []), ...(sd?.adaptive_formats || [])]) {
-          if (await resolveUrl(f, yt)) ok++
-        }
+        for (const f of [...(sd?.formats || []), ...(sd?.adaptive_formats || [])]) if (await resolveUrl(f, yt)) ok++
         entry.urls = ok
       } catch (err) {
         entry.error = String(err.message || err).slice(0, 160)
@@ -218,8 +335,18 @@ app.get('/ytdl', async (req, res) => {
     return res.json({ status: true, author: AUTHOR, id, diagnostics })
   }
 
+  // 1) Primary: VISIONOS + PO token
+  try {
+    const { yt, info } = await withPot(id)
+    const result = await buildResponse(id, yt, info)
+    if (result.mp4 || result.mp3) {
+      return res.json({ status: true, author: AUTHOR, api: API_NAME, client: 'VISIONOS+POT', response: result })
+    }
+  } catch {}
+
+  // 2) Fallback: multiple clients (parallel)
   const attempts = clientsWanted.map(async (clientType) => {
-    const { yt, info } = await processClient(clientType, id)
+    const { yt, info } = await processFallback(clientType, id)
     const result = await buildResponse(id, yt, info)
     if (!result.mp4 && !result.mp3) throw new Error(`no formats from ${clientType}`)
     return { client: clientType, result }
@@ -229,9 +356,14 @@ app.get('/ytdl', async (req, res) => {
     const first = await Promise.any(attempts)
     return res.json({ status: true, author: AUTHOR, api: API_NAME, client: first.client, response: first.result })
   } catch {
-    const { yt, info } = await processClient(clientsWanted[0], id).catch(() => ({ yt: null, info: {} }))
-    const result = yt ? await buildResponse(id, yt, info) : { id, url: `https://www.youtube.com/watch?v=${id}` }
-    return res.json({ status: true, author: AUTHOR, api: API_NAME, client: null, response: result, message: 'Data video kosong (mungkin diblokir dari IP server).' })
+    return res.json({
+      status: true,
+      author: AUTHOR,
+      api: API_NAME,
+      client: null,
+      response: { id, url: `https://www.youtube.com/watch?v=${id}`, title: null, mp4: null, mp3: null, tombol: { watch: `https://www.youtube.com/watch?v=${id}`, downloadMp4: null, downloadMp3: null } },
+      message: 'Data video kosong. IP server mungkin diblokir YouTube (butuh cookies / proxy).'
+    })
   }
 })
 
